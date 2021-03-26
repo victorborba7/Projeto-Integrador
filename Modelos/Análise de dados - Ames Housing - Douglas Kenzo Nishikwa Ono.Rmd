@@ -1,0 +1,459 @@
+---
+title: "Análise de dados - Ames Housing"
+author: "Douglas Kenzo"
+date: "10/03/2021"
+output: html_document
+---
+
+<style>
+body {
+text-align: justify}
+</style>
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introdução
+
+Este documento se trata do processamento e análise da base de dados Ames Housing. Este pacote é composto por diversas variàveis referentes aos imoóveis na região de Ames. Sendo assim, o estudo desenvolvido se baseia na hipótese de uma empresa de software que gostaria de criar um produto para que os clientes possam obter uma previsão do preço de venda de casas baseado em diversas informações dela. 
+
+Durante o trabalho será realizada uma análise exploratória do conjunto de dados e posteriormente o cálculo de diferentes modelos preditivos. Desta forma, pretende-se comparar cada um deles e definir qual é o  melhor para o problema em questão.
+
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+library(rpart.plot)
+library(randomForest)
+library(modeldata)
+library(pROC)
+library(ranger)
+library(leaflet)
+library(rsample)
+library(tidyverse)
+library(skimr)
+library(AmesHousing)
+library(vip)
+library(GGally)
+library(patchwork)
+library(glmnet)
+library(plotmo)
+library(rpart)
+library (forcats)
+library(knitr)
+```
+
+O primeiro passo na resolução deste problema é importar todas as bibliotecas (library) que serão utilizadas e em seguida armazenar os dados do pacote Ames_housing em uma variável: neste caso  "dados".
+
+```{r}
+dados <- make_ames()
+```
+
+Cada uma das propriedades a ser analisada no mapa abaixo:
+
+```{r , echo=FALSE}
+
+dados %>% 
+  leaflet() %>% 
+  addTiles() %>%
+  addMarkers(~Longitude, ~Latitude,)
+
+```
+
+O conjunto de dados Ames é composto por 81 váriveis, de modo que uma visão geral de todos elas pode ser visto a seguir:
+
+```{r, echo=FALSE}
+skim(dados)
+```
+
+A partir destas informações podemos observar que não existem campos vazios: todos as linhas estão preenchidas com alguma informação. Sendo assim, não será necessário o preenchimento forçado.
+
+Com base nessa análise também vemos que algumas variáveis estão desbalanceadas, ou seja, possuem muitos niveis de um único tipo e poucos de outros. Por exemplo: "Utilities" que possui muitas repostas "AllPub" e apenas 3 entre "NoSeWa" e "NoSewr". Por isso, como a variabilidade é baixa e o impacto no resultado será pequeno, esta variável será excluída. Considerando este mesmo critério, também serão retiradas: Street, Central_Air, Pool_QC, Roof_Matl e Condition_2
+
+Observação: futuramente essa exclusão de variaveis será importante para garantir que quando houver a separação do conunto de dados entre treino e teste, sempre haja uma opçao de reposta em cada conjunto. Por exemplo considerando o caso de "Utilities": se ela não for excluída, existe a possibilidade das repostas "NoSeWa" e "NoSewr" ficarem somente em um dos conjuntos e impossibilitar o cálculo do com o outro. 
+
+```{r}
+dados <- subset(dados, select = -Utilities)
+dados <- subset(dados, select = -Street)
+dados <- subset(dados, select = -Central_Air)
+dados <- subset(dados, select = -Pool_QC)
+dados <- subset(dados, select = -Roof_Matl)
+dados <- subset(dados, select = -Condition_2)
+```
+
+Uma forma inicial de análisar os dados seria plotar uma "matriz de gráficos"  com todas as variáveis para verificar as possiveis relações entre elas. Entretanto, como o conjunto é muito grande, é impossível de realizar esta tarefa. Neste caso, para exemplificar esta tipo de análise, foi selecionado apenas algumas variáveis e o resultado esta a seguir:
+
+
+```{r, echo=FALSE, message = FALSE, cache = TRUE}
+dados_ggpairs <- dados %>% 
+  select(Sale_Price, Year_Sold, Year_Built, Lot_Area, Lot_Frontage, Sale_Condition, 
+         Sale_Type, MS_Zoning, Lot_Shape)
+
+dados_ggpairs %>% 
+  ggpairs()
+```
+
+Uma análise mais detalhada pode ser realizada por meio de gráficos específicos, como o histograma a baixo. Por meio dele vemos a distribuição da quantidade de propriedades em relação ao seu preço: a maior parte delas esta a venda por um preço entre 100 000 e 200 000 dolares. Existem também algumas mais caras, que alcança aproximadamente 750 000
+
+```{r, echo=FALSE, messaage = FALSE}
+dados %>% 
+  ggplot(aes(Sale_Price)) +
+  geom_histogram(fill="blue") + 
+  scale_x_continuous(breaks=seq(0,1000000,100000),labels = scales::comma) + 
+  labs(title="Distribuição dos preços dos imóveis", x ="Preço dos imóveis", y = "Quantidade")
+```
+
+Outra análise interessante é em relação à variação do preço em relaçao ao ano de construção: vemos que tendencialmente as casas mais novas possuem um preço maior em relação às mais velhas. Entretanto,  existem também alguns outliers como uma propriedade com mais de 100 anos que custa quase meio milhao de doláres: neste caso para entender melhor o motivo deste fenômeno seria necessário um estudo especifico considerando todas as váriveis. Todavia, para este trabalho o mais importante é a tendência, sendo que os próprios modelos de previsão amortizam esses dados que estão muito fora.
+
+
+```{r, echo=FALSE}
+dados %>% 
+  ggplot(aes(Year_Built, Sale_Price)) + 
+  geom_point(color = "red") +
+  scale_y_continuous(breaks=seq(0,1000000,100000),labels = scales::comma) + 
+  labs(title="Variação do preço ao longo dos anos", y ="Preço dos imóveis", x = "Ano de construção")
+
+```
+
+Por fim, um outro estudo possível é em relação à area do loteamento: por veio da gráfico a seguir concluímos que apesar de haver uma grande variabilidade no prço dos imóveis, a maior parte deles consiste em lotes menores que 25000 m². Existem tabém alguns outliers que devem ser propriedades mais afastadas do centro.
+
+```{r, echo=FALSE}
+dados %>% 
+  ggplot(aes(Lot_Area, Sale_Price)) + 
+  geom_point(color = "darkgreen") + 
+  scale_y_continuous(breaks=seq(0,1000000,100000),labels = scales::comma) + 
+  labs(title="Variação do preço em relação à area do lote", y ="Preço dos imóveis", x = "Área")
+```
+
+Para verificar esta informação que as maiores propriedades estão fora do centro da cidade foi realizdo um teste com a maior propriedade. Primeiro realizou-se um filtro na base de dados para encontrar o imóvel com o maior loteamente e em seguida suas coordenadas foram plotadas no mapa a seguir: 
+
+```{r, echo=FALSE}
+maior_area <- dados[which.max(dados$Lot_Area),]
+
+maior_area %>% 
+  leaflet() %>% 
+  addTiles() %>%
+  addMarkers(~Longitude, ~Latitude,)
+```
+
+# Análise de modelos preditivos
+
+O passo inicial para o trabalho com diferentes modelos preditivos consiste na separação da base de dados entre treino e teste: primeiro conjunto será utilizado para calcular o modelo e o segundo para calcular o erro. Para serapação nestas duas partes será feito um sorteio aleatório por meio do index de cada imóvel, considerando uma proporção de 75% para o treino e 25% para o teste. 
+
+Neste trabalho está sendo ulitizado uma uma semente para possibilitar futuras reproduções do código
+
+```{r}
+set.seed(123)
+
+idx <- sample(nrow(dados), size = .75*nrow(dados), replace = FALSE)
+
+```
+
+O próximo passo foi resultado de um processo iterativo: apesar da exclução das variáveis com pouca variabilidade, na primeira tentativa de sepação dos dados entre treino e teste houve ainda casos de preditoras cujas respostas não ficaram dividida nos dois grupos. Sendo assim, para evitar este acontecimento, houve o agrupamento das repostas de algumas variáveis de modo que formassem um grupo maior e possibilitassem a divisão.
+
+Por exemplo no caso da variável "Eletrical", todas as repostas que representassem menos que 50% do todo foram agrupadas na categoria "outros". Assim, isto forma um grupo único maior e aumenta a possibilidade da presença deste nível nos grupos de treino e teste. O mesmo processo foi aplicado para o "Sale_Type", só que neste caso o valor de corte considerado foi de 20%.
+
+```{r}
+dados = dados %>%  
+  mutate( Electrical = fct_lump( Electrical, prop = .5))
+dados = dados %>%  
+  mutate( Sale_Type = fct_lump( Sale_Type, prop = .2))
+
+```
+
+Por fim, é possível realizar a divisão do conjunto de dados entre treino e teste. Também foi criado uma variável "Y" com todos os preços das propriedades
+
+```{r}
+treino_1 <- dados[idx,]
+teste_1 <- dados[-idx,]
+
+y <- dados$Sale_Price
+```
+
+Para cada modelo preditivo será realizado uma comparação do conjunto de teste e treino com base no erro quadrático médio. Deste modo, será possível determinar qual deles possui o menor erro e consequentemente melhor se enquadra para este problema em específico.
+
+Para facilitar a comparação, os erros quadráticos médios serão armenzedos em um tibble (tipo de tabela) criado a seguir
+
+
+```{r, echo = FALSE}
+resultados <- tibble(Método = c("lm", "ridge", "lasso", "elastic-net", "Àrvore de regressão", "bagging", "Floresta aleatória"), MSE = NA)
+
+kable(resultados)
+```
+
+## Modelo Linear
+
+O primeiro modelo a ser avaliado é o Modelo Lienar. Para isto, utlizando a própria função "lm" foi realizado o cálculo da predição do conjunto de dados de treino em função do Sale_Price.
+
+Uma vez com o modelo, é necessário testa-lo: com o modelo em mãos é possivel aplica-lo aos dados de teste para prever quando seria o valor calculado do imóvel.
+
+Para calcular a acurácia do modelo utilizou se a métrica do Erro Quadrático Médio: portanto comparou se cada valor previsto pelo modelo com o real, multiplicou se o resultado ao quadrado e por fim retirou a média geral. Este processo será repetido para cada um dos modelos a fim de possibilitar a comparação.
+
+```{r, warning=FALSE}
+fit_lm <- lm(Sale_Price ~ ., data = treino_1)
+
+y_lm <- predict(fit_lm, teste_1)
+
+resultados$MSE[resultados$Método == "lm"] <- mean((y[-idx] - y_lm)^2)
+```
+
+Uma outra análise interessante é em relção a importância de cada variáveil. Como cada modelo utiliza métodos de cálculos particulares, o peso de cada variável varia entre eles varia. No caso do modelo linear, as 10 variáveis mais importantes são:
+
+```{r, echo=FALSE}
+g1 <- vip(fit_lm, mapping = aes(fill = Sign)) + 
+  labs(subtitle = "LM")
+
+g1 + plot_layout(guides = "collect")
+```
+
+## Ridge
+
+Os próximos três modelos consistem em métodos de penalização dos coeficientes, sendo que a diferença entre eles será a forma como isto será realizada por meio do parâmetro alpha. 
+
+Para os cálculos destes três modelos é necessário transformar a base de dados em uma matriz composta apenas por números. Neste processo todas as variáveis do tipo texto são substituídas por combinações binárias como 0 ou 1. No caso de uma preditora possuir três ou mais níveis de resposta ela será dividida em mais de uma coluna, de modo que a combinação entre elas forneça a mesma informação.
+
+```{r}
+entrada <- model.matrix(Sale_Price ~ ., data = dados)[,-1]
+```
+
+O proximo passo é o cálculo do modelo utilizando a função "glmnet" utilizando os mesmos índices (idx) selecionados para treino
+
+```{r}
+ridge <- glmnet(entrada[idx,], y[idx], alpha = 0)
+```
+
+No gráfico a seguir é possível ver a variação dos coefientes de cada variável. Como existem muitas delas a visualização é confusa
+
+```{r, echo=FALSE}
+
+plot_glmnet(ridge, lwd = 2, cex.lab = 1.3)
+```
+
+O próximo step consiste na validação cruzada, em que avaliamos a variação do lambda em função do erro quadrático médio. Por meio deste processo, podemos definir qual o melhor valor deste parâmetro, ou seja, aquele que gerá o menor erro:
+
+```{r}
+cv_ridge <- cv.glmnet(entrada[idx,], y[idx], alpha = 0)
+
+plot(cv_ridge, cex.lab = 1.3)
+```
+
+Para concluir, com o modelo definido e o melhor lambda conhecido, é possivel fazer a previsão dos preços para o conjunto de teste e comparar com o real. Assim, posteriormente será calculado o erro quadrático médio para comparação:
+
+```{r}
+y_ridge <- predict(ridge, newx = entrada[-idx,], s = cv_ridge$lambda.1se)
+
+resultados$MSE[resultados$Método == "ridge"] <- mean((y[-idx] - y_ridge)^2)
+```
+
+## Lasso
+
+Como mencionado anteriormente, o método Lasso é similar ao Ridge alterando a forma de penalização: neste caso o valor de alpha será igual a 1. 
+
+```{r}
+lasso <- glmnet(entrada[idx,], y[idx], alpha = 1, nlambda = 1000)
+```
+
+O gráfico de coefientes também esta difícil de visualizar por causa da quantidade de variáveis do problema. Entretanto, é interessaante ver, que diferentemente do método Ridge, a medida que lambda aumenta, os coeficientes convergem.
+
+```{r, echo = FALSE}
+plot_glmnet(lasso, lwd = 2, cex.lab = 1.3, xvar = "lambda")
+```
+
+Para definição do melhor lambda também é utilizado o processo de validação cruzada:
+
+```{r}
+cv_lasso <- cv.glmnet(entrada[idx,], y[idx], alpha = 1, lambda = lasso$lambda)
+
+plot(cv_lasso, cex.lab = 1.3)
+```
+
+Por fim, com as informações obtidas é possível calcular os preços preditos no conjunto de teste e comparar com o os valores reais para obter o erro quadrático médio
+
+```{r}
+y_lasso <- predict(lasso, newx = entrada[-idx,], s = cv_lasso$lambda.min)
+
+resultados$MSE[resultados$Método == "lasso"] <- mean((y[-idx] - y_lasso)^2)
+```
+
+## Elastic net
+
+O método de Elastic-Net consiste em uma mistura entre Ridge e Lasso, portanto as etapas do processo de desenvolvimento serão muito similares as já executadas anteriormente. 
+
+Para diferenciar este modelo no cálculo do glmnet deve ser definido um valor de alpha menor que 1 e maior que 0: no caso estamos utilizando 0.5
+
+```{r}
+elastic_net <- glmnet(entrada[idx,], y[idx], alpha = 0.5, nlambda = 1000)
+
+```
+
+Neste caso também efetuamos a etapa de validação cruzada para definição do melhor valor de lambda que posteriormente ser utilizado no cálculo da previsão
+
+```{r}
+cv_elastic_net <- cv.glmnet(entrada[idx,], y[idx], alpha = 0.5)
+
+plot(cv_elastic_net, cex.lab = 1.3)
+
+y_elastic_net <- predict(elastic_net, newx = entrada[-idx,], s = cv_elastic_net$lambda.min)
+
+resultados$MSE[resultados$Método == "elastic-net"] <- mean((y[-idx] - y_elastic_net)^2)
+```
+
+Por fim, podemos fazer uma comparação entre as variáveis mais importantes para os métodos Ridge, Lasso e Elastic_n: 
+
+```{r, echo = FALSE}
+g2 <- vip(ridge, mapping = aes(fill = Sign)) + 
+  labs(subtitle = "Ridge")
+
+g3 <- vip(lasso, mapping = aes(fill = Sign)) + 
+  labs(subtitle = "LASSO")
+
+g4 <- vip(elastic_net, mapping = aes(fill = Sign)) + 
+  labs(subtitle = "Elastic Net")
+
+g2 /  g3 / g4 + plot_layout(guides = "collect")
+
+```
+
+## Árvore
+
+O método de regressão "Árvore" consiste em subdividir o cojunto em análise de forma a deixar cada um deles mais homogênio possível. Este processo de divisão pode ocorrer até que algum limite seja alcançado, como por exemplo cp (complexity parameter) ou profundidade máxima alcançada.
+
+Para o desenvolvimento deste processo foi utilizado a função "rpart" no conjunto de treino 
+
+```{r}
+arvore <- rpart(Sale_Price ~ ., treino_1)
+```
+
+A árvore resultante de processo pode ser vista a seguir:
+
+```{r}
+rpart.plot(arvore)
+```
+
+Para possibilitar a comparação com os modelos anteriores, também foi feito a previão de preços no cojunto de testes e posteriormente comparado com o valor real:
+
+```{r}
+predito_ar <- predict(arvore, teste_1)
+
+resultados$MSE[resultados$Método == "Àrvore de regressão"] <- mean((y[-idx] - predito_ar)^2)
+```
+
+## Floresta aleatória
+
+O método de Floresta Aleatória é similar anterior na médida em que também utiliza o princípio de árvores. Entretanto, a grande particularidade deste modelo é a possibilidade da inclusão do bootstrap, prática de reamostragem, que permite a variação das preditoras ao longo do cálculo.  
+
+Para o desenvolvimento deste processo foi utilizado a função "randonForest" no conjunto de treino e em seguida com o modelo resultante o preço previsto. Para finalizar foi realizada uma comparação em relação ao valor real para cálculo do valor erro quadrático médio.
+
+```{r}
+rf <- randomForest(Sale_Price ~ ., data = treino_1)
+
+predito_rf <- predict(rf, teste_1)
+
+resultados$MSE[resultados$Método == "Floresta aleatória"] <- mean((y[-idx] - predito_rf)^2)
+```
+
+Por meio do gráfico a seguir, é interessante ver como a medida que o número de árvores aumenta, o erro quadrático médio diminiu:
+
+```{r, echo = FALSE}
+tibble(arvore = 1:length(rf$mse), 
+       mse = rf$mse) %>% 
+  ggplot(aes(arvore, mse)) + 
+  geom_line(color = "red", size = 1.2) + 
+  ylab("MSE (OOB)") + 
+  xlab("Número de Árvores") +
+  ggtitle("Erro quadrático médio em função do número de árvores (Floresta Aleatória)") +
+  theme_bw()
+```
+
+Similar ao efetuado anteriormente, também é possível definir uma lista das 10 váriveis mais importantes
+
+```{r, echo = FALSE}
+g5 <- vip(rf) + 
+  labs(subtitle = "Randon Florest")
+
+g5 + plot_layout(guides = "collect") 
+```
+
+O interessando de se notar é que a qualidade do imóvel esta de fato diretamente relacionada ao seu preço. E ao plotar esta relação em um gráfico vemos que isso é verdade: quanto melhor a qualidade, mais valorizada é a propriedade
+
+```{r, echo = FALSE}
+dados %>% 
+  ggplot(aes(Overall_Qual, Sale_Price))+ 
+  geom_point(color = "red")+ 
+  scale_y_continuous(breaks=seq(0,1000000,100000),labels = scales::comma) + 
+  labs(title="Variação do preço em relação à qualidade", y ="Preço dos imóveis", x = "Qualidade")
+```
+
+
+## Bagging
+
+O método Bagging é um tipo epsecial da Floresta Aleatória, no qual o número de variáveis que podem variar a cada nível de cálculo corresponde ao total do cojunto. Por isso, o processo desenvolvido nesta etapa é muito similar ao anteior, com a execessão de que ao executar a função "randomForest" iremos alterar o número de variáveis que o modelo utiliza por padão: em linhas de código "mtry=ncol(dados)-1" - estamos subtraindo um pois desconsideramos o "Sale_Price" que é a variável de interesse.
+
+Para agilizar o processamento também estamos definindo o núemro máximo de árvores à 200 unidades. Por meio da anáilise do gráfico MSE gerado anteriormente para a floresta aleatória, vemos que a estabilização do resultado ocorre antes disso.
+
+```{r}
+bag <- randomForest(Sale_Price~., treino_1, ntree=200, mtry=ncol(dados)-1)
+
+predito_bag <- predict(bag, teste_1)
+
+resultados$MSE[resultados$Método == "bagging"] <- mean((y[-idx] - predito_bag)^2)
+```
+
+A seguir temos o gráfico de erro quadrático médio específico para o método Bagging:
+
+```{r, echo = FALSE}
+tibble(arvore = 1:length(bag$mse), 
+       mse = bag$mse) %>% 
+  ggplot(aes(arvore, mse)) + 
+  geom_line(color = "blue", size = 1.2) + 
+  ylab("MSE (OOB)") + 
+  xlab("Número de Árvores") + 
+  ggtitle("Erro quadrático médio em função do número de árvores (Bagging)") +
+  theme_bw()
+```
+
+Por fim, também é possivel análisar o grau de importância de cada variável para este método:
+
+```{r, echo = FALSE}
+
+g6 <- vip(bag) + 
+  labs(subtitle = "Bagging")
+
+g6 + plot_layout(guides = "collect") 
+
+```
+
+## Melhor modelo preditivo
+
+A tabela com os todos os resultados dos erros quadráticos médios podem ser vista a seguir:
+
+```{r, echo = FALSE}
+kable(resultados)
+```
+
+
+```{r, echo = FALSE}
+resposta <- resultados %>%
+  filter(MSE == min(MSE))
+
+melhor <- resposta$Método
+
+erro_medio_quad <- round(resposta$MSE)
+
+erro_medio <- round(sqrt(erro_medio_quad))
+
+```
+
+Portnato, ao final de todo o processo temos que o melhor modelo é `r melhor`, pois ele apresentou o menor erro quadrático médio de `r erro_medio_quad`. Apesar deste valor ser muito alto, temos que lembrar que ele esta elevado ao quadrado, sendo sua raiz igual à 23 000 dólares. Ou seja, considerando um preço médio de venda igual a 180 000 dólares, o erro previsto no valor do imóvel é de apoximadamente 13%.
+
+Para finalizar todo o trabalho, uma vez definido o melhor método, podemos aplica-lo à todo o conjunto de dados para obter um modelo completo mais preciso. Ele será aplicado futuramente para os novos dados que serão fornecidos:
+
+```{r}
+modelo_final <- randomForest(Sale_Price ~ ., data = dados)
+```
+
+
+
+
+
+
+
